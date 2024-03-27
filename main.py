@@ -2,43 +2,60 @@ import pandas as pd
 import json
 import os
 import shutil
+import re
 
-
-def map_values_to_descriptions(data, source_column, descriptions):
-    mapped_data = {}
-    for key, desc in descriptions.items():
-        # Try to find and map the value using the current description's corresponding index
-        if key in data[source_column]:
-            mapped_data[desc] = data[source_column][key]
-    # Add quarter and date information if present
-    if '0' in data[source_column] and '1' in data[source_column]:
-        mapped_data['quarter'] = data[source_column]['0']  # "Three Months Ended"
-        mapped_data['date'] = data[source_column]['1']  # Specific date
-    return mapped_data
+def is_specific_date_format(string):
+    """
+    Checks if the given string matches a specific date format (e.g., "December 31, 2022").
+    """
+    return bool(re.match(r'^[A-Za-z]+ \d{1,2}, \d{4}$', string))
 
 
 def process_json_data(json_file_path):
     with open(json_file_path, 'r') as file:
         data = json.load(file)
 
-    # Extract descriptions as keys from the 'Unnamed: 0' column (ignoring nulls)
-    descriptions = {str(k): v for k, v in data['Unnamed: 0'].items() if v}
+    structure_column = "Unnamed: 0"
+    value_columns = [key for key in data.keys() if key != structure_column]
 
-    # Initialize a structure to hold all mapped data
-    all_mapped_data = {}
+    nested_json = {}
+    current_section = None
 
-    # Iterate over each column in the JSON data, excluding 'Unnamed: 0' which holds descriptions
-    for column in data:
-        if column != 'Unnamed: 0' and column.startswith('Unnamed'):
-            mapped_data = map_values_to_descriptions(data, column, descriptions)
-            new_key = column.replace('Unnamed', 'Result')
-            all_mapped_data[new_key] = mapped_data
+    for index, label in data[structure_column].items():
+        if label is None:  # End of a section
+            current_section = None
+        else:
+            if current_section is None:  # New section begins
+                current_section = label
+                nested_json[current_section] = {}
+            else:
+                for col in value_columns:
+                    if "Three Months Ended" in data[col]["0"]:
+                        # For json4, include the general time period with the date
+                        date_label = f"{data[col]['0']} {data[col]['1']}"
+                    else:
+                        # For json6, directly use the date, avoiding addition of any preceding text
+                        date_label = data[col]['0']
 
-    return all_mapped_data
+                    # Assign value if present, ensuring not to append section names for json6
+                    value = data[col].get(str(index))
+                    if value:
+                        if label not in nested_json[current_section]:
+                            nested_json[current_section][label] = {}
+                        nested_json[current_section][label][date_label] = value
 
+    # Specifically for json6, removing any mistakenly included section names
+    if any("ASSETS:" in key for key in nested_json.get("ASSETS:", {})):
+        assets_section = nested_json.get("ASSETS:", {})
+        for item, dates in assets_section.items():
+            new_dates = {date.replace("ASSETS:", "").strip(): value for date, value in dates.items()}
+            assets_section[item] = new_dates
+        nested_json["ASSETS:"] = assets_section
+
+    return nested_json
 
 def extract_specific_table(number, dfs):
-    dfs[number].dropna(axis=1, inplace=True, thresh=3)
+    dfs[number].dropna(axis=1, inplace=True, thresh=4)
     dfs[number] = dfs[number].T.drop_duplicates().T
     dfs[number] = dfs[number].drop(columns=dfs[number].columns[(dfs[number] == '$').any()])
     dfs[number] = dfs[number].drop(columns=dfs[number].columns[(dfs[number] == '%').any()])
@@ -95,4 +112,4 @@ def delete_everything_in_folder(folder_path):
 # Press the green button in the gutter to run the script.
 if __name__ == '__main__':
     extract_all_tables()
-    delete_everything_in_folder("./temp")
+    # delete_everything_in_folder("./temp")
